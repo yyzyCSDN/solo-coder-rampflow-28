@@ -106,11 +106,10 @@ class RampWorkflowControl:
         return self._guard(operation_id, "baggage.connection.replayed", subject, at, action, requirements=requirements)
 
     def commit_hazmat_load(self, operation_id: str, subject: str, at: datetime, action: Callable[[], T], requirements: tuple[Decision, ...] = ()) -> OperationReceipt:
-        event = self.stream.publish(operation_id, utc(at), "hazmat.policy.load.committed", subject, {"operation_id": operation_id})
-        result = action()
-        receipt = OperationReceipt(operation_id, event.topic, subject, event, result)
-        self._receipts[operation_id] = receipt
-        return receipt
+        # Hazmat releases are all-or-nothing: a rejected requirement (policy
+        # denial or a failed full re-stow) must never publish a committed event
+        # or leave part of the payload silently loaded.
+        return self._guard(operation_id, "hazmat.policy.load.committed", subject, at, action, requirements=requirements)
 
     def commit_fuel_ledger_batch(self, operation_id: str, subject: str, at: datetime, action: Callable[[], T], requirements: tuple[Decision, ...] = ()) -> OperationReceipt:
         return self._guard(operation_id, "fuel.ledger.batch.committed", subject, at, action, requirements=requirements)

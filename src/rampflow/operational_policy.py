@@ -5,6 +5,8 @@ from datetime import datetime, time
 from enum import Enum
 from typing import Iterable, Mapping
 
+from zoneinfo import ZoneInfo
+
 from .timeutil import utc
 
 
@@ -22,9 +24,16 @@ class PolicyContext:
     terminal: str
     at: datetime
     attributes: Mapping[str, object]
+    # Time rules (start_local/end_local) are wall-clock rules at the airport;
+    # evaluate them in the airport's own zone rather than the UTC wall clock.
+    timezone: str = "UTC"
 
     def __post_init__(self):
         object.__setattr__(self, "at", utc(self.at))
+        try:
+            ZoneInfo(self.timezone)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(f"unknown timezone {self.timezone!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -81,10 +90,17 @@ class PolicyEngine:
             return False
         if rule.start_local is None and rule.end_local is None:
             return True
-        local = ctx.at.timetz().replace(tzinfo=None)
+        # Convert the evaluation instant to airport local wall-clock time.
+        local = ctx.at.astimezone(ZoneInfo(ctx.timezone)).time().replace(tzinfo=None)
         start = rule.start_local or time.min
         end = rule.end_local or time.max
-        return start <= local < end
+        if start < end:
+            return start <= local < end
+        if start > end:
+            # Overnight window, e.g. 23:00-06:00: it spans midnight, so an
+            # early-morning instant still falls under the night rule.
+            return local >= start or local < end
+        return True
 
     def _matches(self, rule: PolicyRule, ctx: PolicyContext) -> bool:
         if rule.operations and ctx.operation not in rule.operations:

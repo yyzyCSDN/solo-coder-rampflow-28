@@ -4,6 +4,7 @@ from datetime import datetime,timedelta
 from typing import Iterable,Mapping
 from .timeutil import Window,utc
 from .models import Decision
+from .dangerous_goods import DEFAULT_INCOMPATIBLE_PAIRS, groups_conflict
 
 @dataclass(frozen=True)
 class ULD:
@@ -34,16 +35,17 @@ class CargoPlan:
     sequence:tuple[str,...]
 
 class CargoManager:
-    def __init__(self,positions:Iterable[CargoPosition]):
+    def __init__(self,positions:Iterable[CargoPosition],
+                 incompatible_pairs:frozenset[frozenset[str]]=DEFAULT_INCOMPATIBLE_PAIRS):
         self.positions={p.position_id:p for p in positions}
+        self.incompatible_pairs=frozenset(incompatible_pairs)
         self.plans:dict[str,CargoPlan]={}
 
     def _compatible(self,uld:ULD,pos:CargoPosition)->bool:
         return uld.contour in pos.allowed_contours and uld.gross_kg<=pos.max_gross_kg
 
     def _hazard_conflict(self,a:ULD,b:ULD)->bool:
-        incompatible={frozenset({"explosive","flammable"}),frozenset({"oxidizer","flammable"}),frozenset({"radioactive","live-animal"})}
-        return any(pair in incompatible for pair in (frozenset({x,y}) for x in a.dangerous_groups for y in b.dangerous_groups))
+        return groups_conflict(a.dangerous_groups,b.dangerous_groups,self.incompatible_pairs)
 
     def plan(self,flight_id:str,ulds:Iterable[ULD],start:datetime,loader_rate_min:int=4)->CargoPlan:
         items=sorted(ulds,key=lambda u:(u.priority,-u.gross_kg,u.uld_id))

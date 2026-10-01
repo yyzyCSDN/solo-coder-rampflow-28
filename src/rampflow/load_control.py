@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 from .models import Decision
+from .dangerous_goods import DEFAULT_INCOMPATIBLE_PAIRS, pair_conflict
 
 @dataclass(frozen=True)
 class Compartment:
@@ -45,10 +46,12 @@ class LoadSheet:
     trim_units:float
 
 class LoadControl:
-    def __init__(self,compartments:Iterable[Compartment],envelope:Iterable[EnvelopePoint],datum_m:float=0.0):
+    def __init__(self,compartments:Iterable[Compartment],envelope:Iterable[EnvelopePoint],datum_m:float=0.0,
+                 incompatible_pairs:frozenset[frozenset[str]]=DEFAULT_INCOMPATIBLE_PAIRS):
         self.compartments={c.compartment_id:c for c in compartments}
         self.envelope=sorted(envelope,key=lambda p:p.weight_kg)
         self.datum_m=datum_m
+        self.incompatible_pairs=frozenset(incompatible_pairs)
         if len(self.envelope)<2:raise ValueError("envelope requires points")
 
     def _index_from_moment(self,moment_kg_m:float)->float:
@@ -65,10 +68,9 @@ class LoadControl:
         return pts[-1].min_index,pts[-1].max_index
 
     def _dangerous_compatible(self,items:tuple[LoadItem,...],candidate:LoadItem)->bool:
-        groups={x.dangerous_group for x in items if x.dangerous_group}
         if not candidate.dangerous_group:return True
-        incompatible={frozenset({"oxidizer","flammable"}),frozenset({"acid","cyanide"})}
-        return all(frozenset({candidate.dangerous_group,g}) not in incompatible for g in groups)
+        groups={x.dangerous_group for x in items if x.dangerous_group}
+        return all(not pair_conflict(candidate.dangerous_group,g,self.incompatible_pairs) for g in groups)
 
     def allocate(self,items:Iterable[LoadItem])->dict[str,tuple[LoadItem,...]]:
         alloc={cid:[] for cid in self.compartments}
@@ -120,6 +122,12 @@ class LoadControl:
             for i in items:
                 if i.kind not in c.allowed_kinds:
                     return Decision(False,"kind","item in incompatible compartment",{"item":i.item_id})
+            groups=[i for i in items if i.dangerous_group]
+            for x in range(len(groups)):
+                for y in range(x+1,len(groups)):
+                    if pair_conflict(groups[x].dangerous_group,groups[y].dangerous_group,self.incompatible_pairs):
+                        return Decision(False,"hazmat-separation","incompatible dangerous cargo in same compartment",
+                                        {"compartment":cid,"a":groups[x].item_id,"b":groups[y].item_id})
         for weight,index,label in ((sheet.takeoff_weight_kg,sheet.takeoff_index,"takeoff"),(sheet.landing_weight_kg,sheet.landing_index,"landing")):
             try:lo,hi=self._bounds(weight)
             except ValueError:return Decision(False,"weight-envelope",f"{label} weight outside envelope")

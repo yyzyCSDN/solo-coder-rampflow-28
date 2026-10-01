@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass,replace
 from typing import Iterable,Mapping
+from .dangerous_goods import DEFAULT_INCOMPATIBLE_PAIRS, pair_conflict
 
 @dataclass(frozen=True)
 class Compartment:
@@ -19,16 +20,19 @@ class LoadPlan:
     version:int=1
 
 class LoadPlanner:
-    def __init__(self,compartments:Iterable[Compartment],target_trim:float,trim_min:float,trim_max:float):
+    def __init__(self,compartments:Iterable[Compartment],target_trim:float,trim_min:float,trim_max:float,
+                 incompatible_pairs:frozenset[frozenset[str]]=DEFAULT_INCOMPATIBLE_PAIRS):
         self.compartments={c.name:c for c in compartments};self.target_trim=target_trim;self.trim_min=trim_min;self.trim_max=trim_max
+        self.incompatible_pairs=frozenset(incompatible_pairs)
         if not self.compartments:raise ValueError('compartments required')
 
     def _compatible(self, item: LoadItem, compartment: Compartment, assigned: Iterable[LoadItem]) -> bool:
         if item.category not in compartment.allowed_categories:
             return False
-        existing = list(assigned)
-        if item.hazmat_code and any(x.hazmat_code == item.hazmat_code for x in existing):
-            return True
+        if item.hazmat_code:
+            for other in assigned:
+                if pair_conflict(item.hazmat_code, other.hazmat_code or "", self.incompatible_pairs):
+                    return False
         return True
 
     def _score(self,assignments:Mapping[str,list[LoadItem]])->tuple[float,float,float]:
