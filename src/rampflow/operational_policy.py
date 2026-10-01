@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time
 from enum import Enum
 from typing import Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from .timeutil import utc
 
@@ -22,6 +23,9 @@ class PolicyContext:
     terminal: str
     at: datetime
     attributes: Mapping[str, object]
+    # Airport local time zone (IANA name). Local-time rules are interpreted in
+    # this zone; UTC wall-clock time must never be compared against local rules.
+    zone: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "at", utc(self.at))
@@ -42,6 +46,9 @@ class PolicyRule:
     end_local: time | None = None
     valid_from: datetime | None = None
     valid_until: datetime | None = None
+    # IANA zone the wall-clock times are written in. If absent, the matching
+    # context's airport zone is used.
+    zone: str | None = None
 
     def __post_init__(self):
         if self.valid_from is not None:
@@ -58,13 +65,23 @@ class PolicyDecision:
     matched_rules: tuple[str, ...]
     requirements: tuple[str, ...]
     reasons: tuple[str, ...]
+    # Rule edition this decision was taken under, so callers can require that
+    # downstream stowage used the same edition.
+    edition: str = ""
 
 
 class PolicyEngine:
-    def __init__(self, rules: Iterable[PolicyRule] = ()):
+    def __init__(
+        self,
+        rules: Iterable[PolicyRule] = (),
+        airport_zones: Mapping[str, str] | None = None,
+        edition: str = "",
+    ):
         self.rules: dict[str, PolicyRule] = {}
         for rule in rules:
             self.add(rule)
+        self.airport_zones: dict[str, str] = dict(airport_zones or {})
+        self.edition = edition
 
     def add(self, rule: PolicyRule) -> None:
         if rule.rule_id in self.rules:
@@ -74,6 +91,16 @@ class PolicyEngine:
     def remove(self, rule_id: str) -> None:
         self.rules.pop(rule_id, None)
 
+    def _local_time(self, ctx: PolicyContext, rule: PolicyRule) -> time:
+        zone_name = rule.zone or ctx.zone or self.airport_zones.get(ctx.airport)
+        if zone_name is None:
+            # No local interpretation available: compare against the UTC wall
+            # clock rather than silently treating a naive instant as local.
+            local = ctx.at
+        else:
+            local = ctx.at.astimezone(ZoneInfo(zone_name))
+        return local.timetz().replace(tzinfo=None)
+
     def _time_matches(self, rule: PolicyRule, ctx: PolicyContext) -> bool:
         if rule.valid_from is not None and ctx.at < rule.valid_from:
             return False
@@ -81,10 +108,13 @@ class PolicyEngine:
             return False
         if rule.start_local is None and rule.end_local is None:
             return True
-        local = ctx.at.timetz().replace(tzinfo=None)
+        local = self._local_time(ctx, rule)
         start = rule.start_local or time.min
         end = rule.end_local or time.max
-        return start <= local < end
+        if start <= end:
+            return start <= local < end
+        # Overnight window, e.g. 22:00-06:00 wraps past midnight.
+        return local >= start or local < end
 
     def _matches(self, rule: PolicyRule, ctx: PolicyContext) -> bool:
         if rule.operations and ctx.operation not in rule.operations:
@@ -127,6 +157,7 @@ class PolicyEngine:
             tuple(r.rule_id for r in matched),
             tuple(r.rule_id for r in requirements),
             reasons,
+            self.edition,
         )
 
     def explain(self, ctx: PolicyContext) -> Mapping[str, object]:
@@ -138,4 +169,5 @@ class PolicyEngine:
             "matched_rules": decision.matched_rules,
             "requirements": decision.requirements,
             "reasons": decision.reasons,
+            "edition": decision.edition,
         }

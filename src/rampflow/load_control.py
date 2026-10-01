@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 from .models import Decision
+from .hazmat import HAZMAT_RULEBOOK,HazmatRulebook
 
 @dataclass(frozen=True)
 class Compartment:
@@ -45,11 +46,16 @@ class LoadSheet:
     trim_units:float
 
 class LoadControl:
-    def __init__(self,compartments:Iterable[Compartment],envelope:Iterable[EnvelopePoint],datum_m:float=0.0):
+    def __init__(self,compartments:Iterable[Compartment],envelope:Iterable[EnvelopePoint],datum_m:float=0.0,rulebook:HazmatRulebook=HAZMAT_RULEBOOK):
         self.compartments={c.compartment_id:c for c in compartments}
         self.envelope=sorted(envelope,key=lambda p:p.weight_kg)
         self.datum_m=datum_m
+        self.rulebook=rulebook
         if len(self.envelope)<2:raise ValueError("envelope requires points")
+
+    @property
+    def hazmat_version(self)->str:
+        return self.rulebook.version
 
     def _index_from_moment(self,moment_kg_m:float)->float:
         return moment_kg_m/1000.0
@@ -67,8 +73,7 @@ class LoadControl:
     def _dangerous_compatible(self,items:tuple[LoadItem,...],candidate:LoadItem)->bool:
         groups={x.dangerous_group for x in items if x.dangerous_group}
         if not candidate.dangerous_group:return True
-        incompatible={frozenset({"oxidizer","flammable"}),frozenset({"acid","cyanide"})}
-        return all(frozenset({candidate.dangerous_group,g}) not in incompatible for g in groups)
+        return self.rulebook.conflicting_pair((candidate.dangerous_group,),groups) is None
 
     def allocate(self,items:Iterable[LoadItem])->dict[str,tuple[LoadItem,...]]:
         alloc={cid:[] for cid in self.compartments}
@@ -120,6 +125,12 @@ class LoadControl:
             for i in items:
                 if i.kind not in c.allowed_kinds:
                     return Decision(False,"kind","item in incompatible compartment",{"item":i.item_id})
+            present=[i for i in items if i.dangerous_group]
+            for x in range(len(present)):
+                for y in range(x+1,len(present)):
+                    pair=self.rulebook.conflicting_pair((present[x].dangerous_group,),(present[y].dangerous_group,))
+                    if pair:
+                        return Decision(False,"hazmat-separation","incompatible dangerous goods share compartment",{"compartment":cid,"a":present[x].item_id,"b":present[y].item_id,"pair":pair})
         for weight,index,label in ((sheet.takeoff_weight_kg,sheet.takeoff_index,"takeoff"),(sheet.landing_weight_kg,sheet.landing_index,"landing")):
             try:lo,hi=self._bounds(weight)
             except ValueError:return Decision(False,"weight-envelope",f"{label} weight outside envelope")
